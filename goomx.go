@@ -11,7 +11,7 @@ import (
 	dbus "github.com/godbus/dbus"
 
 	//	dbus "github.com/guelfey/go.dbus"
-	log "github.com/sirupsen/logrus"
+
 	"github.com/sonnt85/gosutils/sutils"
 )
 
@@ -142,17 +142,17 @@ func getDbusConnection() (conn *dbus.Conn, err error) {
 		dbus.AuthCookieSha1(user, home),
 	}
 
-	log.Debug("omxplayer: opening dbus session")
+	//	log.Debug("omxplayer: opening dbus session")
 	if conn, err = dbus.SessionBusPrivate(); err != nil {
 		return
 	}
 
-	log.Debug("omxplayer: authenticating dbus session")
+	//	log.Debug("omxplayer: authenticating dbus session")
 	if err = conn.Auth(authMethods); err != nil {
 		return
 	}
 
-	log.Debug("omxplayer: initializing dbus session")
+	//	log.Debug("omxplayer: initializing dbus session")
 	err = conn.Hello()
 	return
 }
@@ -161,7 +161,7 @@ func getDbusConnection() (conn *dbus.Conn, err error) {
 // establish a D-Bus connection. If the connection's path or PID cannot be read,
 // the associated error is returned.
 func setupDbusEnvironment() (err error) {
-	log.Debug("omxplayer: setting up dbus environment")
+	//	log.Debug("omxplayer: setting up dbus environment")
 
 	path, err := getDbusPath()
 	if err != nil {
@@ -224,7 +224,7 @@ func removeDbusFiles() {
 // execOmxplayer starts a new OMXPlayer process and tells it to pause the video
 // by passing a "p" on standard input.
 func execOmxplayer(url string, args ...string) (cmd *exec.Cmd, err error) {
-	log.Debug("omxplayer: starting omxplayer process")
+	//	log.Debug("omxplayer: starting omxplayer process")
 
 	args = append(args, url)
 

@@ -17,8 +17,6 @@ import (
 	//	dbus "github.com/guelfey/go.dbus"
 	"github.com/sonnt85/gosutils/sexec"
 	"github.com/sonnt85/gosutils/sutils"
-
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -673,13 +671,13 @@ func (p *Player) Stop() (err error) {
 	//	p.command.Stdin = strings.NewReader(keyQuit)
 
 	if p.IsRunning() || p.IsReady() {
-		start := time.Now()
+		//		start := time.Now()
 		err = sutils.DbusCall(p.bus, cmdStop)
 		//		p.command.Stdin = strings.NewReader(keyQuit)
 		//		fmt.Println("cmdStop done")
 		p.command.Process.Kill()
 		p.command.Wait()
-		fmt.Println("Timeout for quit omxplayerr", time.Since(start))
+		//		fmt.Println("Timeout for quit omxplayerr", time.Since(start))
 
 		//		fmt.Println("Wait done")
 		//		fmt.Println("Status omx", p.command.ProcessState)
@@ -695,10 +693,10 @@ func (p *Player) Stop() (err error) {
 // Seek performs a relative seek from the current video position. See
 // https://github.com/popcornmix/omxplayer#seek for more details.
 func (p *Player) Seek(amount int64) (int64, error) {
-	log.WithFields(log.Fields{
-		"path":        cmdSeek,
-		"paramAmount": amount,
-	}).Debug("omxplayer: dbus call")
+	//	log.WithFields(log.Fields{
+	//		"path":        cmdSeek,
+	//		"paramAmount": amount,
+	//	}).Debug("omxplayer: dbus call")
 	call := p.bus.Call(cmdSeek, 0, amount)
 	if call.Err != nil {
 		return 0, call.Err
@@ -709,11 +707,11 @@ func (p *Player) Seek(amount int64) (int64, error) {
 // SetPosition performs an absolute seek to the specified video position. See
 // https://github.com/popcornmix/omxplayer#setposition for more details.
 func (p *Player) SetPosition(path string, position int64) (int64, error) {
-	log.WithFields(log.Fields{
-		"path":          cmdSetPosition,
-		"paramPath":     path,
-		"paramPosition": position,
-	}).Debug("omxplayer: dbus call")
+	//	log.WithFields(log.Fields{
+	//		"path":          cmdSetPosition,
+	//		"paramPath":     path,
+	//		"paramPosition": position,
+	//	}).Debug("omxplayer: dbus call")
 	call := p.bus.Call(cmdSetPosition, 0, dbus.ObjectPath(path), position)
 	if call.Err != nil {
 		return 0, call.Err
@@ -749,10 +747,10 @@ func (p *Player) Raise() (bool, error) {
 // specified. See https://github.com/popcornmix/omxplayer#volume for more
 // details.
 func (p *Player) Volume(volume ...float64) (float64, error) {
-	log.WithFields(log.Fields{
-		"path":        cmdVolume,
-		"paramVolume": volume,
-	}).Debug("omxplayer: dbus call")
+	//	log.WithFields(log.Fields{
+	//		"path":        cmdVolume,
+	//		"paramVolume": volume,
+	//	}).Debug("omxplayer: dbus call")
 	if len(volume) == 0 {
 		return sutils.DbusGetFloat64(p.bus, cmdVolume)
 	}
@@ -873,10 +871,10 @@ func (p *Player) ListVideo() ([]string, error) {
 // SelectSubtitle specifies which subtitle track should be used. See
 // https://github.com/popcornmix/omxplayer#selectsubtitle for more details.
 func (p *Player) SelectSubtitle(index int32) (bool, error) {
-	log.WithFields(log.Fields{
-		"path":       cmdSelectSubtitle,
-		"paramIndex": index,
-	}).Debug("omxplayer: dbus call")
+	//	log.WithFields(log.Fields{
+	//		"path":       cmdSelectSubtitle,
+	//		"paramIndex": index,
+	//	}).Debug("omxplayer: dbus call")
 	call := p.bus.Call(cmdSelectSubtitle, 0, index)
 	if call.Err != nil {
 		return false, call.Err
@@ -887,10 +885,10 @@ func (p *Player) SelectSubtitle(index int32) (bool, error) {
 // SelectAudio specifies which audio track should be used. See
 // https://github.com/popcornmix/omxplayer#selectaudio for more details.
 func (p *Player) SelectAudio(index int32) (bool, error) {
-	log.WithFields(log.Fields{
-		"path":       cmdSelectAudio,
-		"paramIndex": index,
-	}).Debug("omxplayer: dbus call")
+	//	log.WithFields(log.Fields{
+	//		"path":       cmdSelectAudio,
+	//		"paramIndex": index,
+	//	}).Debug("omxplayer: dbus call")
 	call := p.bus.Call(cmdSelectAudio, 0, index)
 	if call.Err != nil {
 		return false, call.Err
@@ -913,9 +911,9 @@ func (p *Player) HideSubtitles() error {
 // Action allows for executing keyboard commands. See
 // https://github.com/popcornmix/omxplayer#action for more details.
 func (p *Player) Action(action int32) error {
-	log.WithFields(log.Fields{
-		"path":        cmdAction,
-		"paramAction": action,
-	}).Debug("omxplayer: dbus call")
+	//	log.WithFields(log.Fields{
+	//		"path":        cmdAction,
+	//		"paramAction": action,
+	//	}).Debug("omxplayer: dbus call")
 	return p.bus.Call(cmdAction, 0, action).Err
 }
