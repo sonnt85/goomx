@@ -275,14 +275,6 @@ func (p *Player) PlRunPlaylist() {
 		//	err = player.ShowSubtitles()
 	loopcheck:
 		for {
-			//			if time.Now().After(stopAt) {
-			//				p.Stop()
-			//				break
-			//			}
-
-			//			if _, err := p.PlaybackStatus(); err != nil {
-			//				break
-			//			}
 			ticker := time.After(time.Millisecond * 25)
 			select {
 			case <-p.cstop:
@@ -317,7 +309,7 @@ func (p *Player) PlRunPlaylist() {
 		if len(videofile) == 0 {
 			videofile = "/demo.mp4"
 			if !sutils.PathIsFile(videofile) {
-				fmt.Println("videofile len is 0", videofile)
+				time.Sleep(time.Second)
 				continue
 			}
 		}
@@ -446,8 +438,6 @@ func (p *Player) PlAutoCleanup() bool {
 	}
 }
 func (p *Player) PlLoadVideo(url string, args ...string) (err error) {
-	//	fmt.Println("omxplayer: Loading new video Lock")
-
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	//	fmt.Println("omxplayer: Loading new video")
@@ -474,14 +464,17 @@ func (p *Player) PlLoadVideo(url string, args ...string) (err error) {
 		return
 	}
 
-	conn, err := getDbusConnection()
-	if err != nil {
-		return
+	p.command = cmd
+	if p.connection == nil {
+		conn, err := getDbusConnection()
+		if err != nil {
+			return err
+		}
+
+		p.connection = conn
+		p.bus = conn.Object(ifaceOmx, pathMpris).(*dbus.Object)
 	}
 
-	p.command = cmd
-	p.connection = conn
-	p.bus = conn.Object(ifaceOmx, pathMpris).(*dbus.Object)
 	return
 }
 
