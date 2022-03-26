@@ -1,5 +1,4 @@
-//go:build linux && arm
-// +build linux,arm
+//// +build linux,arm
 
 package goomx
 
@@ -109,6 +108,7 @@ func NewPlayer(args ...string) (player *Player, err error) {
 	player.mutex = new(sync.Mutex)
 	player.argsOmx = args
 	player.ctx, player.CancelFunc = context.WithCancel(context.Background())
+	player.playingFile = make(chan FilePlay)
 	player.Playlist = goring.NewPlaylist[string]()
 	go player.__startService()
 	return

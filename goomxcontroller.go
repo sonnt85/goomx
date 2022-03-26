@@ -1,5 +1,4 @@
-//go:build linux && arm
-// +build linux,arm
+//// +build linux,arm
 
 package goomx
 
@@ -7,14 +6,13 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"path"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	dbus "github.com/godbus/dbus"
-
-	//	dbus "github.com/guelfey/go.dbus"
 	"github.com/sonnt85/goring"
 	"github.com/sonnt85/gosutils/sutils"
 )
@@ -80,8 +78,9 @@ type CommonOmx struct {
 }
 
 type FilePlay struct {
-	pathFile string
-	args     []string
+	pathFile     string
+	isStreamLink bool
+	args         []string
 }
 type Player struct {
 	command *exec.Cmd
@@ -97,16 +96,12 @@ type Player struct {
 	videodir           string
 	mutex              *sync.Mutex
 	once               sync.Once
-	cstop              chan struct{}
 	startedViewPicture bool
 	playingFile        chan FilePlay
-	// cplay          chan struct{}
-	// cpause         chan struct{}
-	// playingFlag    chan struct{}
-	condStop   *sync.Cond
-	condStart  *sync.Cond
-	ctx        context.Context
-	CancelFunc context.CancelFunc
+	condStop           *sync.Cond
+	condStart          *sync.Cond
+	ctx                context.Context
+	CancelFunc         context.CancelFunc
 }
 
 var Gplayer *Player
@@ -152,7 +147,7 @@ func (p *Player) GetPlaylistWithoutPath() []string {
 	retstrs, _ := p.Copy()
 	names := make([]string, len(retstrs))
 	for i, v := range retstrs {
-		names[i] = path.Base(v)
+		names[i] = filepath.Base(v)
 	}
 	return names
 }
@@ -170,6 +165,7 @@ func (p *Player) Stop() {
 func (p *Player) Play() bool {
 	if p.Length() != 0 {
 		p.enablePlay = true
+		p.condStart.Broadcast()
 		return true
 	} else {
 		return false
@@ -185,7 +181,11 @@ func (p *Player) GetSavedVolume() float64 {
 }
 
 func (p *Player) ConfigureNewPlaylist(list []string) (chaged bool) {
-	return p.UpdateNewPlaylist(list)
+	chaged = p.UpdateNewPlaylist(list)
+	if chaged {
+		p.condStop.Broadcast()
+	}
+	return
 	// retstr, _ = p.Copy()
 	// return retstr
 }
@@ -210,6 +210,14 @@ func (p *Player) ActiveViewDefaultPictures(picspath string) {
 			var err error
 			p.startedViewPicture = true
 			for {
+				p.condStop.L.Lock()
+				if p.enablePlay {
+					for p.IsRunning() {
+						p.condStop.Wait()
+					}
+				}
+				p.condStop.L.Unlock()
+
 				if sutils.PathIsDir(picspath) {
 					cmd = exec.Command("omxiv", "-t", "3", "-a", "center", "--transition", "blend", "--duration", "3000", picspath)
 				} else if sutils.PathIsFile(picspath) {
@@ -218,6 +226,7 @@ func (p *Player) ActiveViewDefaultPictures(picspath string) {
 					p.startedViewPicture = false
 					return
 				}
+				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 				cmd.Stdout = nil
 				cmd.Stderr = nil
 
@@ -229,12 +238,14 @@ func (p *Player) ActiveViewDefaultPictures(picspath string) {
 				go func() {
 					p.condStart.L.Lock()
 					p.condStart.Wait() // unlock and wati signal, brocard
-					cmd.Process.Kill()
-					cmd.Process.Release()
+					if cmd.ProcessState == nil {
+						syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+						cmd.Process.Kill()
+					}
 					p.condStart.L.Unlock()
 				}()
 				cmd.Wait()
-				time.Sleep(time.Second * 1)
+
 			}
 		}()
 	}
@@ -243,6 +254,11 @@ func (p *Player) ActiveViewDefaultPictures(picspath string) {
 func (p *Player) __queueService() {
 	var filePlay FilePlay
 	for {
+		p.condStart.L.Lock()
+		for !p.enablePlay {
+			p.condStart.Wait()
+		}
+		p.condStart.L.Unlock()
 		nextFile, _ := p.NextWait() // block
 		filePlay.pathFile = nextFile
 		p.playingFile <- filePlay
@@ -255,13 +271,12 @@ func (p *Player) __startService() {
 	var args []string
 	var err error
 	// var cmd *exec.Cmd
+	fmt.Println("Waiting for play")
 	go p.__queueService()
 	for {
 		filePlay = <-p.playingFile
-		if !p.enablePlay {
-			time.Sleep(time.Millisecond * 500)
-		}
-		if !sutils.PathIsFile(filePlay.pathFile) {
+		fmt.Println("New file for play: ", filePlay.pathFile)
+		if !filePlay.isStreamLink && !sutils.PathIsFile(filePlay.pathFile) {
 			continue
 		}
 		if len(p.argsOmx) != 0 {
@@ -276,21 +291,34 @@ func (p *Player) __startService() {
 		args = append(args, filePlay.pathFile)
 
 		p.command = exec.Command(exeOxmPlayer, args...)
+		p.command.Stdin = nil
+		p.command.Stdout = nil
+		p.command.Stderr = nil
+		p.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		// cmd.Stdin = strings.NewReader(keyPause)
 		err = p.command.Start()
 		if err != nil {
+			fmt.Printf("Can not start: %s - %s\n", filePlay.pathFile, err.Error())
 			continue
 		}
 		// if !p.WaitForReadyWithTimeOut(time.Millisecond * 3000) {
 		// 	continue
 		// }
 		// if cmd.ProcessState.
+		killcmd := func() {
+			if p.command.ProcessState == nil && p.command.Process != nil {
+				// p.CmdQuit()
+				syscall.Kill(-p.command.Process.Pid, syscall.SIGKILL)
+				// p.command.Process.Kill() //force kill process
+			}
+		}
 		func() { // release dbus connection if exits
+			endFunc := false
 			defer func() {
-				if !p.command.ProcessState.Exited() {
-					p.command.Process.Kill() //force kill process
+				if !endFunc {
+					killcmd()
+					p.command.Wait()
 				} //force kill process
-				p.command.Process.Release()
 			}()
 
 			err = setupDbusEnvironment() //wait timeout dbus then set enroviment dbus
@@ -307,21 +335,25 @@ func (p *Player) __startService() {
 				p.condStop.L.Lock()
 				p.condStop.Wait()
 				if conn.Connected() {
+					fmt.Println("Release dbus connection")
 					conn.Close()
 				}
-				if !p.command.ProcessState.Exited() {
-					p.command.Process.Kill() //force kill process
-				}
+				killcmd()
 				p.condStop.L.Unlock()
 			}()
 			p.condStart.Broadcast()
-			// p.Raise()
-			if _, err = p.CmdVolume(p.GetSavedVolume()); err != nil {
-				fmt.Println("Can not Set Volume", err)
+			go func() {
+				p.WaitForReadyWithTimeOut(time.Second * 3)
+				if _, err = p.CmdVolume(p.GetSavedVolume()); err != nil {
+					fmt.Println("Can not Set Volume", err)
+				}
 				// continue
-			}
+			}()
+
 			err = p.command.Wait() // wait for end video
 			p.condStop.Broadcast()
+			endFunc = true
+			fmt.Println("Finish play ", filePlay.pathFile)
 		}()
 	}
 }
@@ -334,7 +366,7 @@ func (p *Player) IsRunning() bool {
 	if p.command == nil {
 		return false
 	}
-	return !p.command.ProcessState.Exited() && sutils.IsProcessAlive(p.command.Process.Pid)
+	return p.command.ProcessState == nil && p.command.Process != nil && sutils.IsProcessAlive(p.command.Process.Pid)
 }
 
 // IsReady checks to see if the Player instance is ready to accept D-Bus
@@ -382,7 +414,6 @@ func (p *Player) WaitForQuitTimeOut(timeout time.Duration) bool {
 // Quit stops the currently playing video and terminates the omxplayer process.
 // See https://github.com/popcornmix/omxplayer#quit for more details.
 func (p *Player) CmdQuit() error {
-	//	return p.command.Process.Kill()
 	return sutils.DbusCall(p.bus, cmdQuit)
 }
 
@@ -511,10 +542,12 @@ func (p *Player) CmdPlayPause() error {
 func (p *Player) CmdStop() bool {
 	if p.IsRunning() || p.IsReady() {
 		sutils.DbusCall(p.bus, cmdStop)
-		p.command.Process.Kill()
-		p.command.Process.Release()
+		if p.command.ProcessState == nil && p.command.Process != nil {
+			p.command.Process.Kill()
+		}
 		p.command.Wait()
-		return !p.IsRunning()
+		return true
+		// return !p.IsRunning()
 	}
 	return true
 }
