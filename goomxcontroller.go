@@ -1,13 +1,13 @@
+//go:build linux && arm
 // +build linux,arm
+
 package goomx
 
 import (
-	"errors"
+	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"reflect"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +15,7 @@ import (
 	dbus "github.com/godbus/dbus"
 
 	//	dbus "github.com/guelfey/go.dbus"
-	"github.com/sonnt85/gosutils/sexec"
+	"github.com/sonnt85/goring"
 	"github.com/sonnt85/gosutils/sutils"
 )
 
@@ -75,165 +75,125 @@ const (
 )
 
 // The Player struct provides access to all of omxplayer's D-Bus methods.
+type CommonOmx struct {
+	command *exec.Cmd
+}
+
+type FilePlay struct {
+	pathFile string
+	args     []string
+}
 type Player struct {
-	command        *exec.Cmd
-	connection     *dbus.Conn
-	bus            *dbus.Object
-	ready          bool
-	argsOmx        []string
-	currentVolume  float64
-	activePlaylist bool
-	enablePlay     bool
-	indexRunning   int
-	playlist       []string
-	videodir       string
-	mutex          *sync.Mutex
-	once           sync.Once
-	cstop          chan struct{}
-	cplay          chan struct{}
-	cpause         chan struct{}
+	command *exec.Cmd
+	// connection         *dbus.Conn
+	// bus                *dbus.Object
+	bus           dbus.BusObject
+	ready         bool
+	argsOmx       []string
+	currentVolume float64
+	enablePlay    bool
+	indexRunning  int
+	*goring.Playlist[string]
+	videodir           string
+	mutex              *sync.Mutex
+	once               sync.Once
+	cstop              chan struct{}
+	startedViewPicture bool
+	playingFile        chan FilePlay
+	// cplay          chan struct{}
+	// cpause         chan struct{}
+	// playingFlag    chan struct{}
+	condStop   *sync.Cond
+	condStart  *sync.Cond
+	ctx        context.Context
+	CancelFunc context.CancelFunc
 }
 
-func (p *Player) PlNextVideo(updateIndex bool) (retfile string) {
-	//	p.mutex.Lock()
-	//	defer p.mutex.Unlock()
-	if len(p.playlist) != 0 {
-		tmpindex := p.indexRunning + 1
-		if tmpindex >= len(p.playlist) {
-			tmpindex = 0
-		}
-		if updateIndex {
-			p.indexRunning = tmpindex
-		}
-		//		fmt.Println(p.enablePlay, len(p.playlist), tmpindex, p.playlist[tmpindex])
-		return p.playlist[tmpindex]
-	}
-	return
-}
+var Gplayer *Player
 
-func (p *Player) PlPrevVideo(updateIndex bool) (retfile string) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	if len(p.playlist) != 0 {
-		tmpindex := p.indexRunning - 1
-		if tmpindex < 0 {
-			tmpindex = len(p.playlist) - 1
-		}
-		if updateIndex {
-			p.indexRunning = tmpindex
-		}
-		return p.playlist[tmpindex]
-	}
-	return
-}
-
-func (p *Player) PlGetRunningVideo() (retfile string) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	if len(p.playlist) != 0 {
-		return p.playlist[p.indexRunning]
-	}
-	return
-}
-
-func (p *Player) PlVideoIsExists(f string) (retbool bool) {
-	retbool = sutils.PathIsFile(p.videodir + f)
-	return retbool
-}
-
-func (p *Player) PlDeleteVideos(files []string) ([]string, error) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	errlist := []string{}
-	for _, f := range files {
-		fullPath := p.videodir + f
-		if sutils.PathIsFile(fullPath) {
-			if os.Remove(fullPath) != nil {
-				errlist = append(errlist, f)
-			}
-		} else {
-			errlist = append(errlist, f)
-		}
-	}
-	if len(errlist) != 0 {
-		return errlist, errors.New("Some files can not deleted")
+func (p *Player) PlayNextVideo() (retfile string, ok bool) {
+	if p.Length() != 0 && p.enablePlay {
+		p.condStop.Broadcast()
+		retfile, err := p.Current()
+		return retfile, err == nil
 	} else {
-		return errlist, nil
+		return
 	}
 }
 
-func (p *Player) PlAddVideoToPlaylist(finename string, index int) bool {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	tmpplaylist := make([]string, 0)
+func (p *Player) PlayPrevVideo() (retfile string, ok bool) {
+	if p.Length() != 0 && p.enablePlay {
+		retfile, _ = p.Prev()
+		p.condStop.Broadcast()
+		return retfile, true
+	} else {
+		return
+	}
+}
 
-	if p.PlVideoIsExists(finename) {
-		for i := 0; i < len(p.playlist); i++ {
-			if i != index {
-				tmpplaylist = append(tmpplaylist, p.playlist[i])
-			} else {
-				tmpplaylist = append(tmpplaylist, finename)
-			}
-		}
-		p.playlist = tmpplaylist
+func (p *Player) GetPlaying() (retfile string, ok bool) {
+	if p.Length() != 0 && p.enablePlay {
+		retfile, err := p.Current()
+		return retfile, err == nil
+	} else {
+		return
+	}
+}
+
+func (p *Player) AddVideoToPlaylist(finename string, index int) bool {
+	return nil == p.Insert(index, finename)
+}
+
+func (p *Player) RemoveVideoFromPlaylist(index int) bool {
+	return nil == p.Remove(index)
+}
+
+func (p *Player) GetPlaylistWithoutPath() []string {
+	retstrs, _ := p.Copy()
+	names := make([]string, len(retstrs))
+	for i, v := range retstrs {
+		names[i] = path.Base(v)
+	}
+	return names
+}
+
+func (p *Player) GetPlaylist() (retstrs []string) {
+	retstrs, _ = p.Copy()
+	return retstrs
+}
+
+func (p *Player) Stop() {
+	p.enablePlay = false
+	p.condStop.Broadcast()
+}
+
+func (p *Player) Play() bool {
+	if p.Length() != 0 {
+		p.enablePlay = true
 		return true
 	} else {
 		return false
 	}
 }
 
-func (p *Player) PlDeleteVideoFromPlaylist(index int) bool {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	tmpplaylist := make([]string, 0)
-	for i := 0; i < len(p.playlist); i++ {
-		if i != index {
-			tmpplaylist = append(tmpplaylist, p.playlist[i])
-		} else {
-			if len(p.playlist) == (p.indexRunning - 1) {
-				if len(p.playlist) >= 2 {
-					p.indexRunning = len(p.playlist) - 2
-				} else {
-					p.indexRunning = 0
-				}
-			}
-		}
+func (p *Player) PlayIsActive() bool {
+	return p.enablePlay
+}
+
+func (p *Player) GetSavedVolume() float64 {
+	return p.currentVolume
+}
+
+func (p *Player) ConfigureNewPlaylist(list []string) (chaged bool) {
+	return p.UpdateNewPlaylist(list)
+	// retstr, _ = p.Copy()
+	// return retstr
+}
+
+func (p *Player) ActiveViewDefaultPictures(picspath string) {
+	if p.startedViewPicture {
+		return
 	}
-	p.playlist = tmpplaylist
-	return true
-}
-
-func (p *Player) PlGetVideosRoot() string {
-	return p.videodir
-}
-
-func (p *Player) PlSetVideoRoot(pathdir string) {
-	p.videodir = pathdir
-}
-
-func (p *Player) PlGetListVideos() []string {
-	retstrs := make([]string, 0)
-	for _, v := range sutils.FindFile(p.videodir) {
-		retstrs = append(retstrs, filepath.Base(v))
-	}
-	return retstrs
-}
-
-func (p *Player) PlGetPlaylist() []string {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	retstrs := make([]string, 0)
-	for i := 0; i < len(p.playlist); i++ {
-		filename := filepath.Base(p.playlist[i])
-		if i == p.indexRunning {
-			filename = "[[Playing]]" + filename
-		}
-		retstrs = append(retstrs, filename)
-	}
-	return retstrs
-}
-
-func (p *Player) PlViewDefaultPictures(picspath string) {
 	if sutils.PathIsExist(picspath) {
 		//		fb, err := gofb.Open("/dev/fb0")
 		//		if err != nil {
@@ -246,236 +206,124 @@ func (p *Player) PlViewDefaultPictures(picspath string) {
 		//		draw.Draw(fb, fb.Bounds(), magenta, image.ZP, draw.Src)
 		//		return
 		go func() {
+			var cmd *exec.Cmd
+			var err error
+			p.startedViewPicture = true
 			for {
 				if sutils.PathIsDir(picspath) {
-					sexec.ExecCommandShell("omxiv  -t 3 -a center --transition blend --duration 3000 "+picspath, 0)
+					cmd = exec.Command("omxiv", "-t", "3", "-a", "center", "--transition", "blend", "--duration", "3000", picspath)
+				} else if sutils.PathIsFile(picspath) {
+					cmd = exec.Command("omxiv", "-a", "center", "--transition", "blend", "--duration", "3000", picspath)
 				} else {
-					sexec.ExecCommandShell("omxiv  -a center --transition blend --duration 3000 "+picspath, 0)
+					p.startedViewPicture = false
+					return
+				}
+				cmd.Stdout = nil
+				cmd.Stderr = nil
+
+				if err = cmd.Start(); err != nil {
+					time.Sleep(time.Second * 1)
+					continue
 				}
 
+				go func() {
+					p.condStart.L.Lock()
+					p.condStart.Wait() // unlock and wati signal, brocard
+					cmd.Process.Kill()
+					cmd.Process.Release()
+					p.condStart.L.Unlock()
+				}()
+				cmd.Wait()
 				time.Sleep(time.Second * 1)
 			}
 		}()
 	}
-
 }
 
-func (p *Player) PlRunPlaylist() {
-	var err error
-	p.PlConfigurePlaylist([]string{}) //load all video
-	fmt.Println("Staring run playlist", p.PlGetVideosRoot()+":", p.PlGetPlaylist(), "...")
-	defer func() {
-		fmt.Println("Exit playlist mode")
-		p.once = sync.Once{}
-	}()
-	waitingEndVideo := false
-	videofile := ""
-
+func (p *Player) __queueService() {
+	var filePlay FilePlay
 	for {
-		//	err = player.ShowSubtitles()
-	loopcheck:
-		for {
-			ticker := time.After(time.Millisecond * 25)
-			select {
-			case <-p.cstop:
-				fmt.Println("Time Out!")
-			case <-ticker:
-				if !p.PlIsPlaylistModeEnabled() {
-					fmt.Println("Playlist mode is disabled!")
-					p.Stop()
-					return
-				}
+		nextFile, _ := p.NextWait() // block
+		filePlay.pathFile = nextFile
+		p.playingFile <- filePlay
+		// time.Sleep(time.Second)
+	}
+}
 
-				if !p.PlIsEnablePlay() {
-					//			fmt.Println("Play is disabled!")
-					p.Stop()
-					continue
-				}
-
-				if !waitingEndVideo {
-					break loopcheck
-				} else {
-					if !p.IsReady() {
-						fmt.Println("Done play video", videofile)
-						break loopcheck
-					}
-				}
-			}
+func (p *Player) __startService() {
+	var filePlay FilePlay
+	var args []string
+	var err error
+	// var cmd *exec.Cmd
+	go p.__queueService()
+	for {
+		filePlay = <-p.playingFile
+		if !p.enablePlay {
+			time.Sleep(time.Millisecond * 500)
 		}
-		waitingEndVideo = false
-		p.PlAutoCleanup()
-
-		videofile = p.PlNextVideo(true)
-		if len(videofile) == 0 {
-			videofile = "/demo.mp4"
-			if !sutils.PathIsFile(videofile) {
-				time.Sleep(time.Second)
-				continue
-			}
-		}
-
-		fmt.Println("Loading new video", videofile)
-		start := time.Now()
-		timeoutLoadVideo := time.Now().Add(time.Second * 10)
-		errPlay := true
-
-		for {
-			if time.Now().After(timeoutLoadVideo) {
-				break
-			}
-			if err = p.PlLoadVideo(videofile); err != nil {
-				fmt.Println("Can not load video", videofile, err)
-				continue
-			}
-			//player
-			//		dbuspid, _ := getDbusPid()
-			//		dbusadd, _ := getDbusPath()
-			//		fmt.Println("Waiting dbus", dbuspid, dbusadd)
-
-			if !p.WaitForReadyWithTimeOut(time.Millisecond * 3000) {
-				fmt.Println("Timeout for wating omxplayer start after", time.Since(start))
-				continue
-			}
-			errPlay = false
-			break
-		}
-		if errPlay {
-			fmt.Println("Total Timeout for wating omxplayer start after", time.Since(start))
+		if !sutils.PathIsFile(filePlay.pathFile) {
 			continue
 		}
-		fmt.Println("Time to load video: ", time.Since(start))
-		//		fmt.Println("Dbus is running")
-		p.Raise()
-		if _, err = p.Volume(p.PlGetSavedVolume()); err != nil {
-			fmt.Println("Can not Set Volume", err)
-			continue
+		if len(p.argsOmx) != 0 {
+			args = p.argsOmx
+		} else {
+			args = make([]string, 0)
 		}
 
-		if err = p.Play(); err != nil {
-			fmt.Println("Error Play()", videofile, err)
-			continue
+		if len(filePlay.args) != 0 {
+			args = append(args, filePlay.args...)
 		}
+		args = append(args, filePlay.pathFile)
 
-		durmilis, _ := p.Duration()
-
-		//		stopAt := time.Now().Add(time.Duration(durmilis)*time.Millisecond - 1000)
-		//		p.Fullscreen()
-		//		time.Sleep(time.Second * 2)
-		//		if mitype, err := p.SupportedMimeTypes(); err == nil {
-		//			fmt.Println("SupportedMimeTypes", mitype)
-		//		}
-		fmt.Println("Playing video", videofile, durmilis/1000000, "seconds (", p.command.Process.Pid, p.IsRunning(), `)`)
-		//		fmt.Println("Pid status", p.command.ProcessState)
-		waitingEndVideo = true
-	}
-}
-
-func (p *Player) PlEnablePlaylistMode() {
-	p.activePlaylist = true
-	go p.once.Do(p.PlRunPlaylist)
-}
-
-func (p *Player) PlDisablePlaylistMode() {
-	p.activePlaylist = false
-}
-
-func (p *Player) PlIsPlaylistModeEnabled() bool {
-	return p.activePlaylist
-}
-
-func (p *Player) PlDisablePlay() {
-	if srcpath, err := p.GetSource(); err == nil && srcpath == "/demo.mp4" {
-		return
-	}
-	p.Stop()
-	p.enablePlay = false
-}
-
-func (p *Player) PlEnablePlay() {
-	p.enablePlay = true
-}
-
-func (p *Player) PlIsEnablePlay() bool {
-	return p.enablePlay
-}
-
-func (p *Player) PlGetSavedVolume() float64 {
-	return p.currentVolume
-}
-
-func (p *Player) PlConfigurePlaylist(list []string) []string {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	oldlist := p.playlist
-	if len(list) == 0 {
-		p.playlist = sutils.FindFile(p.videodir)
-	} else {
-		for i := 0; i < len(list); i++ {
-			list[i] = p.videodir + list[i]
-		}
-		p.playlist = list
-	}
-	if !reflect.DeepEqual(oldlist, p.playlist) {
-		fmt.Println("PlConfigurePlaylist", oldlist, p.playlist)
-		if p.command != nil {
-			p.Stop()
-		}
-		p.indexRunning = 0
-	}
-	//	sort.Strings(p.playlist)
-	return p.playlist
-	//	fmt.Println("videolist", p.playlist)
-}
-
-//cleanup omxplayer
-func (p *Player) PlAutoCleanup() bool {
-	if p.command != nil && !p.IsReady() && p.IsRunning() {
-		p.command.Process.Kill()
-		p.command.Wait()
-		return false
-	} else {
-		return true
-	}
-}
-func (p *Player) PlLoadVideo(url string, args ...string) (err error) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	//	fmt.Println("omxplayer: Loading new video")
-	if p.command != nil {
-		p.Stop()
-	}
-	//	removeDbusFiles()
-
-	if len(args) == 0 {
-		args = append(p.argsOmx, url)
-	} else {
-		args = append(args, url)
-	}
-	cmd := exec.Command(exeOxmPlayer, args...)
-	//	cmd.CombinedOutput()
-	cmd.Stdin = strings.NewReader(keyPause)
-	err = cmd.Start()
-	if err != nil {
-		return
-	}
-
-	err = setupDbusEnvironment()
-	if err != nil {
-		return
-	}
-
-	p.command = cmd
-	if p.connection == nil {
-		conn, err := getDbusConnection()
+		p.command = exec.Command(exeOxmPlayer, args...)
+		// cmd.Stdin = strings.NewReader(keyPause)
+		err = p.command.Start()
 		if err != nil {
-			return err
+			continue
 		}
+		// if !p.WaitForReadyWithTimeOut(time.Millisecond * 3000) {
+		// 	continue
+		// }
+		// if cmd.ProcessState.
+		func() { // release dbus connection if exits
+			defer func() {
+				if !p.command.ProcessState.Exited() {
+					p.command.Process.Kill() //force kill process
+				} //force kill process
+				p.command.Process.Release()
+			}()
 
-		p.connection = conn
-		p.bus = conn.Object(ifaceOmx, pathMpris).(*dbus.Object)
+			err = setupDbusEnvironment() //wait timeout dbus then set enroviment dbus
+			if err != nil {
+				return
+			}
+
+			conn, err := getDbusConnection()
+			if err != nil {
+				return
+			}
+			p.bus = conn.Object(ifaceOmx, pathMpris)
+			go func() {
+				p.condStop.L.Lock()
+				p.condStop.Wait()
+				if conn.Connected() {
+					conn.Close()
+				}
+				if !p.command.ProcessState.Exited() {
+					p.command.Process.Kill() //force kill process
+				}
+				p.condStop.L.Unlock()
+			}()
+			p.condStart.Broadcast()
+			// p.Raise()
+			if _, err = p.CmdVolume(p.GetSavedVolume()); err != nil {
+				fmt.Println("Can not Set Volume", err)
+				// continue
+			}
+			err = p.command.Wait() // wait for end video
+			p.condStop.Broadcast()
+		}()
 	}
-
-	return
 }
 
 //===============================end of pl===============================
@@ -486,14 +334,14 @@ func (p *Player) IsRunning() bool {
 	if p.command == nil {
 		return false
 	}
-	return sutils.IsProcessAlive(p.command.Process.Pid)
+	return !p.command.ProcessState.Exited() && sutils.IsProcessAlive(p.command.Process.Pid)
 }
 
 // IsReady checks to see if the Player instance is ready to accept D-Bus
 // commands. If the player is ready and can accept commands, the function
 // returns true, otherwise it returns false.
 func (p *Player) IsReady() bool {
-	result, err := p.CanQuit()
+	result, err := p.CmdCanQuit()
 	if err == nil && result {
 		return true
 	} else {
@@ -533,114 +381,114 @@ func (p *Player) WaitForQuitTimeOut(timeout time.Duration) bool {
 
 // Quit stops the currently playing video and terminates the omxplayer process.
 // See https://github.com/popcornmix/omxplayer#quit for more details.
-func (p *Player) Quit() error {
+func (p *Player) CmdQuit() error {
 	//	return p.command.Process.Kill()
 	return sutils.DbusCall(p.bus, cmdQuit)
 }
 
 // CanQuit returns true if the player can quit, false otherwise. See
 // https://github.com/popcornmix/omxplayer#canquit for more details.
-func (p *Player) CanQuit() (bool, error) {
+func (p *Player) CmdCanQuit() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propCanQuit)
 }
 
 // Fullscreen returns true if the player is fullscreen, false otherwise. See
 // https://github.com/popcornmix/omxplayer#fullscreen for more details.
-func (p *Player) Fullscreen() (bool, error) {
+func (p *Player) CmdFullscreen() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propFullscreen)
 }
 
 // CanSetFullscreen returns true if the player can be set to fullscreen, false
 // otherwise. See https://github.com/popcornmix/omxplayer#cansetfullscreen for
 // more details.
-func (p *Player) CanSetFullscreen() (bool, error) {
+func (p *Player) CmdCanSetFullscreen() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propCanSetFullscreen)
 }
 
 // CanRaise returns true if the player can be brought to the front, false
 // otherwise. See https://github.com/popcornmix/omxplayer#canraise for more
 // details.
-func (p *Player) CanRaise() (bool, error) {
+func (p *Player) CmdCanRaise() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propCanRaise)
 }
 
 // HasTrackList returns true if the player has a track list, false otherwise.
 // See https://github.com/popcornmix/omxplayer#hastracklist for more details.
-func (p *Player) HasTrackList() (bool, error) {
+func (p *Player) CmdHasTrackList() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propHasTrackList)
 }
 
 // Identity returns the name of the player instance. See
 // https://github.com/popcornmix/omxplayer#identity for more details.
-func (p *Player) Identity() (string, error) {
+func (p *Player) CmdIdentity() (string, error) {
 	return sutils.DbusGetString(p.bus, propIdentity)
 }
 
 // SupportedURISchemes returns a list of playable URI formats. See
 // https://github.com/popcornmix/omxplayer#supportedurischemes for more details.
-func (p *Player) SupportedURISchemes() ([]string, error) {
+func (p *Player) CmdSupportedURISchemes() ([]string, error) {
 	return sutils.DbusGetStringArray(p.bus, propSupportedURISchemes)
 }
 
 // SupportedMimeTypes returns a list of supported MIME types. See
 // https://github.com/popcornmix/omxplayer#supportedmimetypes for more details.
-func (p *Player) SupportedMimeTypes() ([]string, error) {
+func (p *Player) CmdSupportedMimeTypes() ([]string, error) {
 	return sutils.DbusGetStringArray(p.bus, propSupportedMimeTypes)
 }
 
 // CanGoNext returns true if the player can skip to the next track, false
 // otherwise. See https://github.com/popcornmix/omxplayer#cangonext for more
 // details.
-func (p *Player) CanGoNext() (bool, error) {
+func (p *Player) CmdCanGoNext() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propCanGoNext)
 }
 
 // CanGoPrevious returns true if the player can skip to previous track, false
 // otherwise. See https://github.com/popcornmix/omxplayer#cangoprevious for more
 // details.
-func (p *Player) CanGoPrevious() (bool, error) {
+func (p *Player) CmdCanGoPrevious() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propCanGoPrevious)
 }
 
 // CanSeek returns true if the player can seek, false otherwise. See
 // https://github.com/popcornmix/omxplayer#canseek for more details.
-func (p *Player) CanSeek() (bool, error) {
+func (p *Player) CmdCanSeek() (bool, error) {
 	return sutils.DbusGetBool(p.bus, cmdSeek)
 }
 
 // CanControl returns true if the player can be controlled, false otherwise. See
 // https://github.com/popcornmix/omxplayer#cancontrol for more details.
-func (p *Player) CanControl() (bool, error) {
+func (p *Player) CmdCanControl() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propCanControl)
 }
 
 // CanPlay returns true if the player can play, false otherwise. See
 // https://github.com/popcornmix/omxplayer#canplay for more details.
-func (p *Player) CanPlay() (bool, error) {
+func (p *Player) CmdCanPlay() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propCanPlay)
 }
 
 // CanPause returns true if the player can pause, false otherwise. See
 // https://github.com/popcornmix/omxplayer#canpause for more details.
-func (p *Player) CanPause() (bool, error) {
+func (p *Player) CmdCanPause() (bool, error) {
 	return sutils.DbusGetBool(p.bus, propCanPause)
 }
 
 // Next tells the player to skip to the next chapter. See
 // https://github.com/popcornmix/omxplayer#next for more details.
-func (p *Player) NextTrack() error {
+func (p *Player) CmdNextTrack() error {
 	return sutils.DbusCall(p.bus, cmdNext)
 }
 
 // Previous tells the player to skip to the previous chapter. See
 // https://github.com/popcornmix/omxplayer#previous for more details.
-func (p *Player) PreviousTrack() error {
+func (p *Player) CmdPreviousTrack() error {
 	return sutils.DbusCall(p.bus, cmdPrevious)
 }
 
 // Pause pauses the player if it is playing. Otherwise, it resumes playback. See
 // https://github.com/popcornmix/omxplayer#pause for more details.
-func (p *Player) Pause() error {
+func (p *Player) CmdPause() error {
 	p.command.Stdin = strings.NewReader(keyPause)
 	return sutils.DbusCall(p.bus, cmdPause)
 }
@@ -648,44 +496,32 @@ func (p *Player) Pause() error {
 // Play play the video. If the video is playing, it has no effect,
 // if it is paused it will play from current position.
 // See https://github.com/popcornmix/omxplayer#play for more details.
-func (p *Player) Play() error {
+func (p *Player) CmdPlay() error {
 	return sutils.DbusCall(p.bus, cmdPlay)
 }
 
 // PlayPause pauses the player if it is playing. Otherwise, it resumes playback.
 // See https://github.com/popcornmix/omxplayer#playpause for more details.
-func (p *Player) PlayPause() error {
+func (p *Player) CmdPlayPause() error {
 	return sutils.DbusCall(p.bus, cmdPlayPause)
 }
 
 // Stop tells the player to stop playing the video. See
 // https://github.com/popcornmix/omxplayer#stop for more details.
-func (p *Player) Stop() (err error) {
-	//	p.command.Stdin = strings.NewReader(keyQuit)
-
+func (p *Player) CmdStop() bool {
 	if p.IsRunning() || p.IsReady() {
-		//		start := time.Now()
-		err = sutils.DbusCall(p.bus, cmdStop)
-		//		p.command.Stdin = strings.NewReader(keyQuit)
-		//		fmt.Println("cmdStop done")
+		sutils.DbusCall(p.bus, cmdStop)
 		p.command.Process.Kill()
+		p.command.Process.Release()
 		p.command.Wait()
-		//		fmt.Println("Timeout for quit omxplayerr", time.Since(start))
-
-		//		fmt.Println("Wait done")
-		//		fmt.Println("Status omx", p.command.ProcessState)
-		//		fmt.Println("p.command.Process.Kill()", p.command.Process.Kill())
-		//		fmt.Println("release omx resource", p.command.Process.Release())
+		return !p.IsRunning()
 	}
-	if _, _, err := sexec.ExecCommandShell(`pkill -9 `+exeOxmPlayer, time.Second*1); err != nil {
-		//		checkLTE("/dev/ttyUSB2")
-	}
-	return err
+	return true
 }
 
 // Seek performs a relative seek from the current video position. See
 // https://github.com/popcornmix/omxplayer#seek for more details.
-func (p *Player) Seek(amount int64) (int64, error) {
+func (p *Player) CmdSeek(amount int64) (int64, error) {
 	//	log.WithFields(log.Fields{
 	//		"path":        cmdSeek,
 	//		"paramAmount": amount,
@@ -699,7 +535,7 @@ func (p *Player) Seek(amount int64) (int64, error) {
 
 // SetPosition performs an absolute seek to the specified video position. See
 // https://github.com/popcornmix/omxplayer#setposition for more details.
-func (p *Player) SetPosition(path string, position int64) (int64, error) {
+func (p *Player) CmdSetPosition(path string, position int64) (int64, error) {
 	//	log.WithFields(log.Fields{
 	//		"path":          cmdSetPosition,
 	//		"paramPath":     path,
@@ -716,15 +552,15 @@ func (p *Player) SetPosition(path string, position int64) (int64, error) {
 // https://github.com/popcornmix/omxplayer#playbackstatus for more details.
 //The current state of the player, either "Paused" or "Playing".
 
-func (p *Player) PlaybackStatus() (string, error) {
+func (p *Player) CmdPlaybackStatus() (string, error) {
 	return sutils.DbusGetString(p.bus, propPlaybackStatus)
 }
 
-func (p *Player) GetSource() (string, error) {
+func (p *Player) CmdGetSource() (string, error) {
 	return sutils.DbusGetString(p.bus, cmdGetSource)
 }
 
-func (p *Player) cmdOpenUri(uripath string) error {
+func (p *Player) CmdOpenUri(uripath string) error {
 	call := p.bus.Call(cmdOpenUri, 0, uripath)
 	if call.Err != nil {
 		return call.Err
@@ -732,14 +568,14 @@ func (p *Player) cmdOpenUri(uripath string) error {
 	return nil
 }
 
-func (p *Player) Raise() (bool, error) {
+func (p *Player) CmdRaise() (bool, error) {
 	return sutils.DbusGetBool(p.bus, cmdRaise)
 }
 
 // Volume returns the current volume. Sets a new volume when an argument is
 // specified. See https://github.com/popcornmix/omxplayer#volume for more
 // details.
-func (p *Player) Volume(volume ...float64) (float64, error) {
+func (p *Player) CmdVolume(volume ...float64) (float64, error) {
 	//	log.WithFields(log.Fields{
 	//		"path":        cmdVolume,
 	//		"paramVolume": volume,
@@ -758,14 +594,14 @@ func (p *Player) Volume(volume ...float64) (float64, error) {
 // Volume returns the current volume. Sets a new volume when an argument is
 // specified. See https://github.com/popcornmix/omxplayer#volume for more
 // details.
-func (p *Player) VolumePercent(volume ...int) (volint int, err error) {
+func (p *Player) CmdVolumePercent(volume ...int) (volint int, err error) {
 	var volfloat float64
 	volfloat = 0
 	if len(volume) != 0 {
 		vol := float64(volume[0]) / 100
-		volfloat, err = p.Volume(vol)
+		volfloat, err = p.CmdVolume(vol)
 	} else {
-		volfloat, err = p.Volume()
+		volfloat, err = p.CmdVolume()
 	}
 	volint = int(volfloat * 100)
 	return volint, err
@@ -773,13 +609,13 @@ func (p *Player) VolumePercent(volume ...int) (volint int, err error) {
 
 // Mute mutes the video's audio stream. See
 // https://github.com/popcornmix/omxplayer#mute for more details.
-func (p *Player) Mute() error {
+func (p *Player) CmdMute() error {
 	return sutils.DbusCall(p.bus, cmdMute)
 }
 
 // Unmute unmutes the video's audio stream. See
 // https://github.com/popcornmix/omxplayer#unmute for more details.
-func (p *Player) Unmute() error {
+func (p *Player) CmdUnmute() error {
 	return sutils.DbusCall(p.bus, cmdUnmute)
 }
 
@@ -791,19 +627,19 @@ func (p *Player) Position() (int64, error) {
 
 // Aspect returns the aspect ratio. See
 // https://github.com/popcornmix/omxplayer/blob/master/OMXControl.cpp#L362.
-func (p *Player) Aspect() (float64, error) {
+func (p *Player) CmdAspect() (float64, error) {
 	return sutils.DbusGetFloat64(p.bus, propAspect)
 }
 
 // VideoStreamCount returns the number of available video streams. See
 // https://github.com/popcornmix/omxplayer/blob/master/OMXControl.cpp#L369.
-func (p *Player) VideoStreamCount() (int64, error) {
+func (p *Player) CmdVideoStreamCount() (int64, error) {
 	return sutils.DbusGetInt64(p.bus, propVideoStreamCount)
 }
 
 // ResWidth returns the width of the video. See
 // https://github.com/popcornmix/omxplayer/blob/master/OMXControl.cpp#L376.
-func (p *Player) ResWidth() (int64, error) {
+func (p *Player) CmdResWidth() (int64, error) {
 	return sutils.DbusGetInt64(p.bus, propResWidth)
 }
 
@@ -815,19 +651,19 @@ func (p *Player) ResHeight() (int64, error) {
 
 // Duration returns the total length of the video in milliseconds. See
 // https://github.com/popcornmix/omxplayer#duration for more details.
-func (p *Player) Duration() (int64, error) {
+func (p *Player) CmdDuration() (int64, error) {
 	return sutils.DbusGetInt64(p.bus, propDuration)
 }
 
 // MinimumRate returns the minimum playback rate. See
 // https://github.com/popcornmix/omxplayer#minimumrate for more details.
-func (p *Player) MinimumRate() (float64, error) {
+func (p *Player) CmdMinimumRate() (float64, error) {
 	return sutils.DbusGetFloat64(p.bus, propMinimumRate)
 }
 
 // MaximumRate returns the maximum playback rate. See
 // https://github.com/popcornmix/omxplayer#maximumrate for more details.
-func (p *Player) MaximumRate() (float64, error) {
+func (p *Player) CmdMaximumRate() (float64, error) {
 	return sutils.DbusGetFloat64(p.bus, propMaximumRate)
 }
 
@@ -839,13 +675,13 @@ func (p *Player) ListSubtitles() ([]string, error) {
 
 // HideVideo is an undocumented D-Bus method. See
 // https://github.com/popcornmix/omxplayer/blob/master/OMXControl.cpp#L457.
-func (p *Player) HideVideo() error {
+func (p *Player) CmdHideVideo() error {
 	return sutils.DbusCall(p.bus, cmdHideVideo)
 }
 
 // UnHideVideo is an undocumented D-Bus method. See
 // https://github.com/popcornmix/omxplayer/blob/master/OMXControl.cpp#L462.
-func (p *Player) UnHideVideo() error {
+func (p *Player) CmdUnHideVideo() error {
 	return sutils.DbusCall(p.bus, cmdUnHideVideo)
 }
 
@@ -857,13 +693,13 @@ func (p *Player) ListAudio() ([]string, error) {
 
 // ListVideo returns a list of the video tracks available in the video file. See
 // https://github.com/popcornmix/omxplayer#listvideo for more details.
-func (p *Player) ListVideo() ([]string, error) {
+func (p *Player) CmdListVideo() ([]string, error) {
 	return sutils.DbusGetStringArray(p.bus, cmdListVideo)
 }
 
 // SelectSubtitle specifies which subtitle track should be used. See
 // https://github.com/popcornmix/omxplayer#selectsubtitle for more details.
-func (p *Player) SelectSubtitle(index int32) (bool, error) {
+func (p *Player) CmdSelectSubtitle(index int32) (bool, error) {
 	//	log.WithFields(log.Fields{
 	//		"path":       cmdSelectSubtitle,
 	//		"paramIndex": index,
@@ -877,7 +713,7 @@ func (p *Player) SelectSubtitle(index int32) (bool, error) {
 
 // SelectAudio specifies which audio track should be used. See
 // https://github.com/popcornmix/omxplayer#selectaudio for more details.
-func (p *Player) SelectAudio(index int32) (bool, error) {
+func (p *Player) CmdSelectAudio(index int32) (bool, error) {
 	//	log.WithFields(log.Fields{
 	//		"path":       cmdSelectAudio,
 	//		"paramIndex": index,
@@ -891,19 +727,19 @@ func (p *Player) SelectAudio(index int32) (bool, error) {
 
 // ShowSubtitles starts displaying subtitles. See
 // https://github.com/popcornmix/omxplayer#showsubtitles for more details.
-func (p *Player) ShowSubtitles() error {
+func (p *Player) CmdShowSubtitles() error {
 	return sutils.DbusCall(p.bus, cmdShowSubtitles)
 }
 
 // HideSubtitles stops displaying subtitles. See
 // https://github.com/popcornmix/omxplayer#hidesubtitles for more details.
-func (p *Player) HideSubtitles() error {
+func (p *Player) CmdHideSubtitles() error {
 	return sutils.DbusCall(p.bus, cmdHideSubtitles)
 }
 
 // Action allows for executing keyboard commands. See
 // https://github.com/popcornmix/omxplayer#action for more details.
-func (p *Player) Action(action int32) error {
+func (p *Player) CmdAction(action int32) error {
 	//	log.WithFields(log.Fields{
 	//		"path":        cmdAction,
 	//		"paramAction": action,

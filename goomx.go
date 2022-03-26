@@ -1,7 +1,10 @@
-// +build !windows
+//go:build linux && arm
+// +build linux,arm
+
 package goomx
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strconv"
@@ -9,9 +12,7 @@ import (
 	"sync"
 
 	dbus "github.com/godbus/dbus"
-
-	//	dbus "github.com/guelfey/go.dbus"
-
+	"github.com/sonnt85/goring"
 	"github.com/sonnt85/gosutils/sutils"
 )
 
@@ -91,42 +92,25 @@ func SetUser(u, h string) {
 
 // New returns a new Player instance that can be used to control an OMXPlayer
 // instance that is playing the video located at the specified URL.
-func New(url string, args ...string) (player *Player, err error) {
-	removeDbusFiles()
-	if len(url) != 0 {
-		cmd, err := execOmxplayer(url, args...)
-		if err != nil {
-			return nil, err
-		}
 
-		err = setupDbusEnvironment()
-		if err != nil {
-			return nil, err
-		}
-
-		conn, err := getDbusConnection()
-		if err != nil {
-			return nil, err
-		}
-
-		player = &Player{
-			command:    cmd,
-			connection: conn,
-			bus:        conn.Object(ifaceOmx, pathMpris).(*dbus.Object),
-		}
-	} else {
-		player = &Player{}
+func NewPlayer(args ...string) (player *Player, err error) {
+	if Gplayer != nil {
+		return Gplayer, nil
 	}
+	removeDbusFiles()
+	player = &Player{}
+	Gplayer = player
+	player.condStop = sync.NewCond(new(sync.Mutex))
+	player.condStart = sync.NewCond(new(sync.Mutex))
 
-	player.playlist = make([]string, 0)
 	SetUser(sutils.SysGetUsername(), sutils.GetHomeDir())
-	player.videodir = sutils.GetHomeDir() + "Videos/"
-	os.MkdirAll(player.videodir, 0700)
-	player.activePlaylist = false
 	player.indexRunning = 0
 	player.currentVolume = 0.03
 	player.mutex = new(sync.Mutex)
 	player.argsOmx = args
+	player.ctx, player.CancelFunc = context.WithCancel(context.Background())
+	player.Playlist = goring.NewPlaylist[string]()
+	go player.__startService()
 	return
 }
 
