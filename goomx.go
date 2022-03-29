@@ -8,11 +8,11 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 
 	dbus "github.com/godbus/dbus"
 	"github.com/sonnt85/goring"
 	"github.com/sonnt85/gosutils/sutils"
+	"github.com/sonnt85/gosyncutils"
 )
 
 const (
@@ -99,13 +99,16 @@ func NewPlayer(args ...string) (player *Player, err error) {
 	removeDbusFiles()
 	player = &Player{}
 	Gplayer = player
-	player.condStop = sync.NewCond(new(sync.Mutex))
-	player.condStart = sync.NewCond(new(sync.Mutex))
+	player.condStop = gosyncutils.NewMutipleWait[bool]()
+	player.condStopViewPicture = gosyncutils.NewMutipleWait[bool]()
+	player.condStartViewPicture = gosyncutils.NewMutipleWait[bool]()
+
+	player.condStart = gosyncutils.NewMutipleWait[bool]()
+	player.condFinishCurrentPlaying = gosyncutils.NewMutipleWait[bool]()
+	player.enablePlay = gosyncutils.NewMutipleWait[bool]()
 
 	SetUser(sutils.SysGetUsername(), sutils.GetHomeDir())
-	player.indexRunning = 0
 	player.currentVolume = 0.03
-	player.mutex = new(sync.Mutex)
 	player.argsOmx = args
 	player.ctx, player.CancelFunc = context.WithCancel(context.Background())
 	player.playingFile = make(chan FilePlay)

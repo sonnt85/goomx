@@ -8,13 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	dbus "github.com/godbus/dbus"
 	"github.com/sonnt85/goring"
 	"github.com/sonnt85/gosutils/sutils"
+	"github.com/sonnt85/gosyncutils"
 )
 
 const (
@@ -83,32 +83,31 @@ type FilePlay struct {
 	args         []string
 }
 type Player struct {
-	command *exec.Cmd
-	// connection         *dbus.Conn
-	// bus                *dbus.Object
+	command       *exec.Cmd
 	bus           dbus.BusObject
-	ready         bool
 	argsOmx       []string
 	currentVolume float64
-	enablePlay    bool
-	indexRunning  int
 	*goring.Playlist[string]
-	videodir           string
-	mutex              *sync.Mutex
-	once               sync.Once
-	startedViewPicture bool
-	playingFile        chan FilePlay
-	condStop           *sync.Cond
-	condStart          *sync.Cond
-	ctx                context.Context
-	CancelFunc         context.CancelFunc
+	startedViewPicture       bool
+	playingFile              chan FilePlay
+	enablePlay               *gosyncutils.MutipleWait[bool]
+	condStop                 *gosyncutils.MutipleWait[bool]
+	condStartViewPicture     *gosyncutils.MutipleWait[bool]
+	condStopViewPicture      *gosyncutils.MutipleWait[bool]
+	condFinishCurrentPlaying *gosyncutils.MutipleWait[bool]
+
+	condStart  *gosyncutils.MutipleWait[bool]
+	ctx        context.Context
+	CancelFunc context.CancelFunc
 }
 
 var Gplayer *Player
 
 func (p *Player) PlayNextVideo() (retfile string, ok bool) {
-	if p.Length() != 0 && p.enablePlay {
-		p.condStop.Broadcast()
+	if p.Length() != 0 && p.enablePlay.Get() {
+		if p.IsRunning() {
+			p.condStop.SetThenSendBroadcast(true) // stop to play next video
+		}
 		retfile, err := p.Current()
 		return retfile, err == nil
 	} else {
@@ -117,9 +116,11 @@ func (p *Player) PlayNextVideo() (retfile string, ok bool) {
 }
 
 func (p *Player) PlayPrevVideo() (retfile string, ok bool) {
-	if p.Length() != 0 && p.enablePlay {
+	if p.Length() != 0 && p.enablePlay.Get() {
 		retfile, _ = p.Prev()
-		p.condStop.Broadcast()
+		if p.IsRunning() {
+			p.condStop.SetThenSendBroadcast(true) // stop to play next video
+		}
 		return retfile, true
 	} else {
 		return
@@ -127,7 +128,7 @@ func (p *Player) PlayPrevVideo() (retfile string, ok bool) {
 }
 
 func (p *Player) GetPlaying() (retfile string, ok bool) {
-	if p.Length() != 0 && p.enablePlay {
+	if p.Length() != 0 && p.IsRunning() {
 		retfile, err := p.Current()
 		return retfile, err == nil
 	} else {
@@ -158,22 +159,24 @@ func (p *Player) GetPlaylist() (retstrs []string) {
 }
 
 func (p *Player) Stop() {
-	p.enablePlay = false
-	p.condStop.Broadcast()
+	p.enablePlay.Set(false)
+	p.condStop.SetThenSendBroadcast(true) //stop if it is playing
 }
 
 func (p *Player) Play() bool {
-	if p.Length() != 0 {
-		p.enablePlay = true
-		p.condStart.Broadcast()
-		return true
-	} else {
-		return false
+	// if p.Length() != 0 {
+	if !p.enablePlay.Get() {
+		p.enablePlay.Set(true)
+		p.enablePlay.Broadcast()
 	}
+	return true
+	// } else {
+	// return false
+	// }
 }
 
 func (p *Player) PlayIsActive() bool {
-	return p.enablePlay
+	return p.enablePlay.Get()
 }
 
 func (p *Player) GetSavedVolume() float64 {
@@ -182,12 +185,10 @@ func (p *Player) GetSavedVolume() float64 {
 
 func (p *Player) ConfigureNewPlaylist(list []string) (chaged bool) {
 	chaged = p.UpdateNewPlaylist(list)
-	if chaged {
-		p.condStop.Broadcast()
+	if chaged && p.IsRunning() { // reset play new playlist if playing
+		p.condStop.SetThenSendBroadcast(true)
 	}
 	return
-	// retstr, _ = p.Copy()
-	// return retstr
 }
 
 func (p *Player) ActiveViewDefaultPictures(picspath string) {
@@ -210,13 +211,8 @@ func (p *Player) ActiveViewDefaultPictures(picspath string) {
 			var err error
 			p.startedViewPicture = true
 			for {
-				p.condStop.L.Lock()
-				if p.enablePlay {
-					for p.IsRunning() {
-						p.condStop.Wait()
-					}
-				}
-				p.condStop.L.Unlock()
+				p.condStartViewPicture.TestThenWaitSignalIfNotMatch(true)
+				p.condStartViewPicture.Set(false)
 
 				if sutils.PathIsDir(picspath) {
 					cmd = exec.Command("omxiv", "-t", "3", "-a", "center", "--transition", "blend", "--duration", "3000", picspath)
@@ -235,17 +231,16 @@ func (p *Player) ActiveViewDefaultPictures(picspath string) {
 					continue
 				}
 
-				go func() {
-					p.condStart.L.Lock()
-					p.condStart.Wait() // unlock and wati signal, brocard
-					if cmd.ProcessState == nil {
-						syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-						cmd.Process.Kill()
-					}
-					p.condStart.L.Unlock()
-				}()
-				cmd.Wait()
+				p.condStopViewPicture.TestThenWaitSignalIfNotMatch(true)
+				p.condStopViewPicture.Set(false)
+				if cmd.ProcessState == nil && cmd.Process != nil { //still runnning
+					// syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					cmd.Process.Signal(syscall.SIGKILL)
+					// fmt.Println("Release view picture")
+					// cmd.Process.Kill()
+				}
 
+				cmd.Wait()
 			}
 		}()
 	}
@@ -253,16 +248,24 @@ func (p *Player) ActiveViewDefaultPictures(picspath string) {
 
 func (p *Player) __queueService() {
 	var filePlay FilePlay
+	var nextFile string
+	// time.Sleep(time.Millisecond*100)
+	p.condStartViewPicture.SetThenSendSignal(true)
+	p.NextWait()
+	nextFile, _ = p.PrevWait()
+	filePlay.pathFile = nextFile
+	p.enablePlay.TestThenWaitSignalIfNotMatch(true)
 	for {
-		p.condStart.L.Lock()
-		for !p.enablePlay {
-			p.condStart.Wait()
-		}
-		p.condStart.L.Unlock()
-		nextFile, _ := p.NextWait() // block
-		filePlay.pathFile = nextFile
 		p.playingFile <- filePlay
-		// time.Sleep(time.Second)
+		time.Sleep(time.Millisecond * 2)
+		for !p.condFinishCurrentPlaying.Get() {
+			time.Sleep(time.Millisecond * 10)
+		}
+		p.condFinishCurrentPlaying.Set(false)
+		p.condFinishCurrentPlaying.WaitSignal()
+		p.enablePlay.TestThenWaitSignalIfNotMatch(true)
+		nextFile, _ = p.NextWait()
+		filePlay.pathFile = nextFile
 	}
 }
 
@@ -270,11 +273,12 @@ func (p *Player) __startService() {
 	var filePlay FilePlay
 	var args []string
 	var err error
-	// var cmd *exec.Cmd
 	fmt.Println("Waiting for play")
 	go p.__queueService()
 	for {
+		p.condFinishCurrentPlaying.Broadcast()
 		filePlay = <-p.playingFile
+		p.condFinishCurrentPlaying.Set(true)
 		fmt.Println("New file for play: ", filePlay.pathFile)
 		if !filePlay.isStreamLink && !sutils.PathIsFile(filePlay.pathFile) {
 			continue
@@ -295,21 +299,18 @@ func (p *Player) __startService() {
 		p.command.Stdout = nil
 		p.command.Stderr = nil
 		p.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		// cmd.Stdin = strings.NewReader(keyPause)
 		err = p.command.Start()
 		if err != nil {
 			fmt.Printf("Can not start: %s - %s\n", filePlay.pathFile, err.Error())
 			continue
 		}
-		// if !p.WaitForReadyWithTimeOut(time.Millisecond * 3000) {
-		// 	continue
-		// }
-		// if cmd.ProcessState.
+		p.condStopViewPicture.SetThenSendSignal(true)
 		killcmd := func() {
-			if p.command.ProcessState == nil && p.command.Process != nil {
-				// p.CmdQuit()
+			// if p.command.ProcessState == nil && p.command.Process != nil {
+			if p.command.Process != nil {
+				p.CmdQuit()
 				syscall.Kill(-p.command.Process.Pid, syscall.SIGKILL)
-				// p.command.Process.Kill() //force kill process
+				// p.command.Process.Signal(syscall.SIGKILL) //force kill process
 			}
 		}
 		func() { // release dbus connection if exits
@@ -319,29 +320,37 @@ func (p *Player) __startService() {
 					killcmd()
 					p.command.Wait()
 				} //force kill process
+				p.condStartViewPicture.SetThenSendSignal(true)
+				p.condStop.Set(false) //clear signal send by controler
+				p.condStart.Set(false)
 			}()
 
 			err = setupDbusEnvironment() //wait timeout dbus then set enroviment dbus
 			if err != nil {
+				fmt.Println("can not setupDbusEnvironment")
 				return
 			}
 
 			conn, err := getDbusConnection()
 			if err != nil {
+				fmt.Println("can not get setupDbusEnvironment")
 				return
 			}
 			p.bus = conn.Object(ifaceOmx, pathMpris)
-			go func() {
-				p.condStop.L.Lock()
-				p.condStop.Wait()
+
+			ctx, cancleFunc := context.WithCancel(context.Background())
+			go func(ctx context.Context) {
+				select {
+				case <-p.condStop.TestThenWaitSignalIfMatch(false, true): //force kill
+					killcmd()
+				case <-ctx.Done():
+					p.condStop.Signal()
+				}
 				if conn.Connected() {
 					fmt.Println("Release dbus connection")
 					conn.Close()
 				}
-				killcmd()
-				p.condStop.L.Unlock()
-			}()
-			p.condStart.Broadcast()
+			}(ctx)
 			go func() {
 				p.WaitForReadyWithTimeOut(time.Second * 3)
 				if _, err = p.CmdVolume(p.GetSavedVolume()); err != nil {
@@ -349,9 +358,9 @@ func (p *Player) __startService() {
 				}
 				// continue
 			}()
-
+			p.condStart.SetThenSendBroadcast(true)
 			err = p.command.Wait() // wait for end video
-			p.condStop.Broadcast()
+			cancleFunc()
 			endFunc = true
 			fmt.Println("Finish play ", filePlay.pathFile)
 		}()
@@ -363,10 +372,13 @@ func (p *Player) __startService() {
 // IsRunning checks to see if the OMXPlayer process is running. If it is, the
 // function returns true, otherwise it returns false.
 func (p *Player) IsRunning() bool {
-	if p.command == nil {
-		return false
+	return p.condStart.Get()
+}
+
+func (p *Player) WaitFinishCurrentPlaying() {
+	if p.condStart.Get() {
+		p.condFinishCurrentPlaying.WaitSignal()
 	}
-	return p.command.ProcessState == nil && p.command.Process != nil && sutils.IsProcessAlive(p.command.Process.Pid)
 }
 
 // IsReady checks to see if the Player instance is ready to accept D-Bus
@@ -543,6 +555,7 @@ func (p *Player) CmdStop() bool {
 	if p.IsRunning() || p.IsReady() {
 		sutils.DbusCall(p.bus, cmdStop)
 		if p.command.ProcessState == nil && p.command.Process != nil {
+			syscall.Kill(-p.command.Process.Pid, syscall.SIGKILL)
 			p.command.Process.Kill()
 		}
 		p.command.Wait()
