@@ -3,6 +3,7 @@
 package goomx
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -99,20 +100,22 @@ func NewPlayer(args ...string) (player *Player, err error) {
 	removeDbusFiles()
 	player = &Player{}
 	Gplayer = player
-	player.condStop = gosyncutils.NewMutipleWait[bool]()
-	player.condStopViewPicture = gosyncutils.NewMutipleWait[bool]()
-	player.condStartViewPicture = gosyncutils.NewMutipleWait[bool]()
+	player.condStop = gosyncutils.NewEventOpject[bool]()
+	player.condStopViewPicture = gosyncutils.NewEventOpject[bool]()
+	player.condStartViewPicture = gosyncutils.NewEventOpject[bool]()
 
-	player.condStart = gosyncutils.NewMutipleWait[bool]()
-	player.condFinishCurrentPlaying = gosyncutils.NewMutipleWait[bool]()
-	player.enablePlay = gosyncutils.NewMutipleWait[bool]()
-
+	player.condStart = gosyncutils.NewEventOpject[bool]()
+	player.condFinishCurrentPlaying = gosyncutils.NewEventOpject[struct{}]()
+	player.enablePlay = gosyncutils.NewEventOpject[bool]()
+	player.CommandKeysBuffer = bytes.NewBufferString("")
 	SetUser(sutils.SysGetUsername(), sutils.GetHomeDir())
 	player.currentVolume = 0.03
 	player.argsOmx = args
+	player.SeekStep = gosyncutils.NewEventOpject[int]()
+	player.SeekStep.Set(1)
 	player.ctx, player.CancelFunc = context.WithCancel(context.Background())
 	player.playingFile = make(chan FilePlay)
-	player.Playlist = goring.NewPlaylist[string]()
+	player.EventLinkedList = goring.NewEventLinkedList[string]()
 	go player.__startService()
 	return
 }

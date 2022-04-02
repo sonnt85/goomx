@@ -3,6 +3,7 @@
 package goomx
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -87,44 +88,43 @@ type Player struct {
 	bus           dbus.BusObject
 	argsOmx       []string
 	currentVolume float64
-	*goring.Playlist[string]
+	*goring.EventLinkedList[string]
+	CommandKeysBuffer        *bytes.Buffer
 	startedViewPicture       bool
 	playingFile              chan FilePlay
-	enablePlay               *gosyncutils.MutipleWait[bool]
-	condStop                 *gosyncutils.MutipleWait[bool]
-	condStartViewPicture     *gosyncutils.MutipleWait[bool]
-	condStopViewPicture      *gosyncutils.MutipleWait[bool]
-	condFinishCurrentPlaying *gosyncutils.MutipleWait[bool]
+	SeekStep                 *gosyncutils.EventOpject[int]
+	enablePlay               *gosyncutils.EventOpject[bool]
+	condStop                 *gosyncutils.EventOpject[bool]
+	condStartViewPicture     *gosyncutils.EventOpject[bool]
+	condStopViewPicture      *gosyncutils.EventOpject[bool]
+	condFinishCurrentPlaying *gosyncutils.EventOpject[struct{}]
 
-	condStart  *gosyncutils.MutipleWait[bool]
+	condStart  *gosyncutils.EventOpject[bool]
 	ctx        context.Context
 	CancelFunc context.CancelFunc
 }
 
 var Gplayer *Player
 
-func (p *Player) PlayNextVideo() (retfile string, ok bool) {
+func (p *Player) SeekVideos(n int) (retfile string, ok bool) {
 	if p.Length() != 0 && p.enablePlay.Get() {
-		if p.IsRunning() {
-			p.condStop.SetThenSendBroadcast(true) // stop to play next video
-		}
-		retfile, err := p.Current()
+		p.enablePlay.Set(false)
+		p.condStop.SetThenSendBroadcast(true) // stop to play next video
+		retfile, err := p.SeekWait(n)
+		p.SeekWait(-p.SeekStep.Get())
+		p.enablePlay.Set(true)
 		return retfile, err == nil
 	} else {
 		return
 	}
 }
 
+func (p *Player) PlayNextVideo() (retfile string, ok bool) {
+	return p.SeekVideos(1)
+}
+
 func (p *Player) PlayPrevVideo() (retfile string, ok bool) {
-	if p.Length() != 0 && p.enablePlay.Get() {
-		retfile, _ = p.Prev()
-		if p.IsRunning() {
-			p.condStop.SetThenSendBroadcast(true) // stop to play next video
-		}
-		return retfile, true
-	} else {
-		return
-	}
+	return p.SeekVideos(-1)
 }
 
 func (p *Player) GetPlaying() (retfile string, ok bool) {
@@ -184,7 +184,7 @@ func (p *Player) GetSavedVolume() float64 {
 }
 
 func (p *Player) ConfigureNewPlaylist(list []string) (chaged bool) {
-	chaged = p.UpdateNewPlaylist(list)
+	chaged = p.UpdateNewEventLinkedList(list)
 	if chaged && p.IsRunning() { // reset play new playlist if playing
 		p.condStop.SetThenSendBroadcast(true)
 	}
@@ -196,16 +196,7 @@ func (p *Player) ActiveViewDefaultPictures(picspath string) {
 		return
 	}
 	if sutils.PathIsExist(picspath) {
-		//		fb, err := gofb.Open("/dev/fb0")
-		//		if err != nil {
-		//			fmt.Println("Can not open fb0", err)
-		//			return
-		//		}
-		//		defer fb.Close()
-		//		//Here is a simple example that clears the whole screen to a dark magenta:
-		//		magenta := image.NewUniform(color.RGBA{255, 0, 128, 255})
-		//		draw.Draw(fb, fb.Bounds(), magenta, image.ZP, draw.Src)
-		//		return
+
 		go func() {
 			var cmd *exec.Cmd
 			var err error
@@ -257,14 +248,10 @@ func (p *Player) __queueService() {
 	p.enablePlay.TestThenWaitSignalIfNotMatch(true)
 	for {
 		p.playingFile <- filePlay
-		time.Sleep(time.Millisecond * 2)
-		for !p.condFinishCurrentPlaying.Get() {
-			time.Sleep(time.Millisecond * 10)
-		}
-		p.condFinishCurrentPlaying.Set(false)
 		p.condFinishCurrentPlaying.WaitSignal()
+		// fmt.Println("Waitting new file for play")
 		p.enablePlay.TestThenWaitSignalIfNotMatch(true)
-		nextFile, _ = p.NextWait()
+		nextFile, _ = p.SeekWait(p.SeekStep.Get())
 		filePlay.pathFile = nextFile
 	}
 }
@@ -273,12 +260,12 @@ func (p *Player) __startService() {
 	var filePlay FilePlay
 	var args []string
 	var err error
+	var conn *dbus.Conn
 	fmt.Println("Waiting for play")
 	go p.__queueService()
 	for {
 		p.condFinishCurrentPlaying.Broadcast()
 		filePlay = <-p.playingFile
-		p.condFinishCurrentPlaying.Set(true)
 		fmt.Println("New file for play: ", filePlay.pathFile)
 		if !filePlay.isStreamLink && !sutils.PathIsFile(filePlay.pathFile) {
 			continue
@@ -295,9 +282,11 @@ func (p *Player) __startService() {
 		args = append(args, filePlay.pathFile)
 
 		p.command = exec.Command(exeOxmPlayer, args...)
-		p.command.Stdin = nil
+		p.CommandKeysBuffer.Reset()
+		p.command.Stdin = p.CommandKeysBuffer
 		p.command.Stdout = nil
 		p.command.Stderr = nil
+		//	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} //for linux only
 		p.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		err = p.command.Start()
 		if err != nil {
@@ -308,7 +297,8 @@ func (p *Player) __startService() {
 		killcmd := func() {
 			// if p.command.ProcessState == nil && p.command.Process != nil {
 			if p.command.Process != nil {
-				p.CmdQuit()
+				// p.CmdQuit()
+				p.CommandKeysBuffer.WriteString(keyQuit)
 				syscall.Kill(-p.command.Process.Pid, syscall.SIGKILL)
 				// p.command.Process.Signal(syscall.SIGKILL) //force kill process
 			}
@@ -321,7 +311,8 @@ func (p *Player) __startService() {
 					p.command.Wait()
 				} //force kill process
 				p.condStartViewPicture.SetThenSendSignal(true)
-				p.condStop.Set(false) //clear signal send by controler
+				p.condStop.SetThenSendBroadcast(false)
+				// p.condStop.Set(false) //clear signal send by controler
 				p.condStart.Set(false)
 			}()
 
@@ -331,7 +322,7 @@ func (p *Player) __startService() {
 				return
 			}
 
-			conn, err := getDbusConnection()
+			conn, err = getDbusConnection()
 			if err != nil {
 				fmt.Println("can not get setupDbusEnvironment")
 				return
@@ -347,7 +338,7 @@ func (p *Player) __startService() {
 					p.condStop.Signal()
 				}
 				if conn.Connected() {
-					fmt.Println("Release dbus connection")
+					// fmt.Println("Release dbus connection")
 					conn.Close()
 				}
 			}(ctx)
@@ -364,6 +355,14 @@ func (p *Player) __startService() {
 			endFunc = true
 			fmt.Println("Finish play ", filePlay.pathFile)
 		}()
+	}
+}
+
+func (p *Player) Quit() {
+	if b, err := p.CmdCanQuit(); err == nil && b {
+		p.Quit()
+	} else {
+		p.CommandKeysBuffer.WriteString(keyQuit)
 	}
 }
 
