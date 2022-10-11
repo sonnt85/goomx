@@ -5,7 +5,6 @@ package goomx
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -14,8 +13,10 @@ import (
 
 	dbus "github.com/godbus/dbus"
 	"github.com/sonnt85/goring"
+	"github.com/sonnt85/gosutils/slogrus"
 	"github.com/sonnt85/gosutils/sutils"
 	"github.com/sonnt85/gosyncutils"
+	"github.com/sonnt85/gosystem"
 )
 
 const (
@@ -158,6 +159,18 @@ func (p *Player) GetPlaylist() (retstrs []string) {
 	return retstrs
 }
 
+func (p *Player) VideosDoesNotExist() (retstrs []string) {
+	retstrs, _ = p.Copy()
+	names := make([]string, 0)
+	for _, v := range retstrs {
+		if !gosystem.PathIsExist(v) {
+			names = append(names, v)
+			// filepath.Base(v)
+		}
+	}
+	return names
+}
+
 func (p *Player) Stop() {
 	p.enablePlay.Set(false)
 	p.condStop.SetThenSendBroadcast(true) //stop if it is playing
@@ -227,7 +240,7 @@ func (p *Player) ActiveViewDefaultPictures(picspath string) {
 				if cmd.ProcessState == nil && cmd.Process != nil { //still runnning
 					// syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 					cmd.Process.Signal(syscall.SIGKILL)
-					// fmt.Println("Release view picture")
+					// slogrus.Println("Release view picture")
 					// cmd.Process.Kill()
 				}
 
@@ -249,7 +262,7 @@ func (p *Player) __queueService() {
 	for {
 		p.playingFile <- filePlay
 		p.condFinishCurrentPlaying.WaitSignal()
-		// fmt.Println("Waitting new file for play")
+		// slogrus.Print("Waitting new file for play")
 		p.enablePlay.TestThenWaitSignalIfNotMatch(true)
 		nextFile, _ = p.SeekWait(p.SeekStep.Get())
 		filePlay.pathFile = nextFile
@@ -261,13 +274,14 @@ func (p *Player) __startService() {
 	var args []string
 	var err error
 	var conn *dbus.Conn
-	fmt.Println("Waiting for play")
+	slogrus.Print("Waiting for play")
 	go p.__queueService()
 	for {
 		p.condFinishCurrentPlaying.Broadcast()
 		filePlay = <-p.playingFile
-		fmt.Println("New file for play: ", filePlay.pathFile)
+		slogrus.Print("New file for play: ", filePlay.pathFile)
 		if !filePlay.isStreamLink && !sutils.PathIsFile(filePlay.pathFile) {
+			time.Sleep(time.Millisecond * 500)
 			continue
 		}
 		if len(p.argsOmx) != 0 {
@@ -290,7 +304,7 @@ func (p *Player) __startService() {
 		p.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		err = p.command.Start()
 		if err != nil {
-			fmt.Printf("Can not start: %s - %s\n", filePlay.pathFile, err.Error())
+			slogrus.Printf("Can not start: %s - %s\n", filePlay.pathFile, err.Error())
 			continue
 		}
 		p.condStopViewPicture.SetThenSendSignal(true)
@@ -318,13 +332,13 @@ func (p *Player) __startService() {
 
 			err = setupDbusEnvironment() //wait timeout dbus then set enroviment dbus
 			if err != nil {
-				fmt.Println("can not setupDbusEnvironment")
+				slogrus.Print("can not setupDbusEnvironment")
 				return
 			}
 
 			conn, err = getDbusConnection()
 			if err != nil {
-				fmt.Println("can not get setupDbusEnvironment")
+				slogrus.Print("can not get setupDbusEnvironment")
 				return
 			}
 			p.bus = conn.Object(ifaceOmx, pathMpris)
@@ -338,14 +352,14 @@ func (p *Player) __startService() {
 					p.condStop.Signal()
 				}
 				if conn.Connected() {
-					// fmt.Println("Release dbus connection")
+					slogrus.Print("Release dbus connection")
 					conn.Close()
 				}
 			}(ctx)
 			go func() {
-				p.WaitForReadyWithTimeOut(time.Second * 3)
+				p.WaitForReadyWithTimeOut(time.Second * 10)
 				if _, err = p.CmdVolume(p.GetSavedVolume()); err != nil {
-					fmt.Println("Can not Set Volume", err)
+					slogrus.Error("Can not Set Volume", err)
 				}
 				// continue
 			}()
@@ -353,7 +367,7 @@ func (p *Player) __startService() {
 			err = p.command.Wait() // wait for end video
 			cancleFunc()
 			endFunc = true
-			fmt.Println("Finish play ", filePlay.pathFile)
+			slogrus.Print("Finish play ", filePlay.pathFile)
 		}()
 	}
 }
