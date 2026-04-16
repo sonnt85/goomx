@@ -1,4 +1,4 @@
-//// +build linux,arm
+//go:build linux && arm
 
 package goomx
 
@@ -351,7 +351,7 @@ func (p *Player) __startService() {
 				case <-ctx.Done():
 					p.condStop.Signal()
 				}
-				if conn.Connected() {
+				if conn != nil {
 					slogrus.Print("Release dbus connection")
 					conn.Close()
 				}

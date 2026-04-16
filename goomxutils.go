@@ -1,3 +1,5 @@
+//go:build ignore
+
 package goomx
 
 import (
@@ -11,7 +13,7 @@ func (p *Player) _ActiveViewDefaultPictures(picspath string) {
 	go func() {
 		var dev *gofb.Device
 		var err error
-		dev, err = gofb.NewDevie("/dev/fb0")
+		dev, err = gofb.Open("/dev/fb0")
 
 		if err != nil {
 			log.Println("Can not open fb0", err)
