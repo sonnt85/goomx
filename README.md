@@ -142,3 +142,8 @@ License
 The omxplayer library is available under the MIT license. See the
 [LICENSE](https://github.com/sonnt85/goomx/blob/master/LICENSE) file for
 the full license text.
+
+## Author
+
+**sonnt85** — [thanhson.rf@gmail.com](mailto:thanhson.rf@gmail.com)
+
