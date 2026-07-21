@@ -1,6 +1,6 @@
 module github.com/sonnt85/goomx
 
-go 1.21
+go 1.25.0
 
 toolchain go1.25.5
 
